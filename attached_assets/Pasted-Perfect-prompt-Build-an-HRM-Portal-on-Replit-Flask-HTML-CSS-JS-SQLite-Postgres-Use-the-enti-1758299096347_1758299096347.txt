@@ -1,0 +1,334 @@
+Perfect prompt — Build an HRM Portal on Replit (Flask + HTML/CSS/JS + SQLite/Postgres)
+
+Use the entire text below as a single prompt to give to a developer, an AI-coder on Replit, or to paste into a Replit project README. It’s explicit about features, DB schema, routes, UI, security, file structure, and acceptance criteria.
+
+Project summary (one-line):
+Create a Replit-hosted HRM Portal (Flask backend + HTML/CSS/vanilla JS frontend) with three user role groups (Manager, HR, Accounts, Admin), role-based access control, Excel bulk upload of lead data, dynamic allocation and reallocation flows, per-record status workflow, full audit trail in SQL, and CSV/Excel export for Admin. The Manager can create/update/delete logins for HR/Admin/Accounts; HR and Accounts cannot create logins.
+
+Tech stack & environment
+
+Backend: Python 3.10+, Flask (Flask-Login, Flask-Migrate optional), SQLAlchemy ORM
+
+Frontend: HTML5, CSS3 (preferably Tailwind or Bootstrap optional), vanilla JS (Fetch API / AJAX), DataTables (optional) for tabular views
+
+Database: SQLite for Replit dev by default (switchable to PostgreSQL in production)
+
+Excel handling: pandas + openpyxl
+
+Authentication: Flask-Login + password hashing (werkzeug.security.generate_password_hash / check_password_hash)
+
+Optional realtime: Flask-SocketIO (only if requested later)
+
+Deployment/run on Replit: include requirements.txt and replit.nix or start script
+
+Key user roles and permissions
+
+Manager
+
+Can create, update, delete user accounts of types: HR, Accounts, Admin.
+
+Can upload an Excel of leads (columns: name, email, phone, location, degree).
+
+Can view full activity trail and transparent “travel path” of every record.
+
+Can reassign/reallocate leads and see reallocation history and current owner.
+
+HR
+
+Login only. Cannot create/delete users.
+
+Sees only leads allocated to them in their queue (unless manager changes).
+
+Can update lead details and set status: scheduled, not_interested, not_available, no_show, completed, reschedule, etc.
+
+If status == scheduled, HR fills walk-in date/time, domain, session days, additional notes.
+
+If status == completed, record is removed from HR active queue and is forwarded to Accounts automatically.
+
+Accounts
+
+Login only. Sees leads forwarded by HR (with HR name and record details).
+
+Has statuses: pending, ready_for_class, pending_but_ready.
+
+When Accounts selects ready_for_class or pending_but_ready, those records are forwarded to Admin for final view/export.
+
+Can view which HR created/sent the record and edit finance-specific fields if required.
+
+Admin
+
+Login only. Sees aggregated data and full lists (filtered by HR or Accounts if desired).
+
+Can export selected data to Excel/CSV: include name, email, phone, domain, timings, session days, HR name, accounts handler, and backend modification date.
+
+Can view counts, dashboards, and download reports.
+
+Note: Only Manager can create/delete/update user accounts. Manager’s audits show everything.
+
+Core data model (SQLAlchemy / relational)
+
+(Use these tables as a base; add indexes and foreign keys.)
+
+users
+
+id INTEGER PK
+
+username TEXT UNIQUE NOT NULL
+
+email TEXT UNIQUE
+
+password_hash TEXT NOT NULL
+
+role TEXT NOT NULL CHECK(role IN ('manager','hr','accounts','admin'))
+
+full_name TEXT
+
+created_at TIMESTAMP
+
+is_active BOOLEAN
+
+leads
+
+id INTEGER PK
+
+name TEXT
+
+email TEXT
+
+phone TEXT
+
+location TEXT
+
+degree TEXT
+
+domain TEXT NULLABLE
+
+session_days INTEGER NULLABLE
+
+walkin_date DATE NULLABLE
+
+walkin_time TIME NULLABLE
+
+current_owner_id FK -> users.id (the HR or Accounts user who currently owns the lead)
+
+source_manager_id FK -> users.id (the manager who uploaded/assigned)
+
+status TEXT NOT NULL DEFAULT 'new' -- examples: new, scheduled, not_interested, not_available, no_show, completed, pending, ready_for_class, pending_but_ready, reschedule
+
+is_active BOOLEAN (active means in someone's queue; completed or archived -> false)
+
+created_at, updated_at TIMESTAMPS
+
+lead_history (audit / travel log)
+
+id PK
+
+lead_id FK -> leads.id
+
+from_user_id FK -> users.id (nullable)
+
+to_user_id FK -> users.id (nullable)
+
+previous_status TEXT
+
+new_status TEXT
+
+change_reason TEXT
+
+change_data JSON (snapshot of fields changed)
+
+changed_by_user_id FK -> users.id
+
+changed_at TIMESTAMP
+
+uploads
+
+id, uploader_id, file_name, uploaded_at, row_count, status
+
+(Optional) account_actions to store finance actions done by Accounts users.
+
+API & route contract (summary)
+
+(Use RESTful endpoints; protect with role checks in each view.)
+
+GET / -> landing or redirect to /dashboard
+
+GET /login, POST /login -> authentication
+
+GET /logout
+
+GET /manager/users -> Manager view of users (list)
+
+POST /manager/users -> create HR/Accounts/Admin user (payload: username, email, role)
+
+PUT /manager/users/<id> -> update user (activate/deactivate)
+
+DELETE /manager/users/<id> -> delete user
+
+POST /manager/upload-leads -> file upload (Excel) — parse and create leads, allocate to HRs in common (round-robin or share pool) or manager chooses HR allocation strategy
+
+GET /hr/leads -> list leads for logged-in HR (paginated, filtered)
+
+PUT /hr/leads/<lead_id> -> update lead data and set status (when status changes, create history entry)
+
+GET /accounts/leads -> list leads assigned to accounts
+
+PUT /accounts/leads/<lead_id> -> update accounts status
+
+GET /admin/export -> generate Excel/CSV according to filters (by date range, HR, accounts, status)
+
+GET /manager/audit/lead/<lead_id> -> show travel path / history for a lead
+
+Allocation & business logic (explicit)
+
+Upload behavior: Manager uploads Excel. System validates columns: name,email,phone,location,degree. Store file in /uploads, parse with pandas. For initial allocation:
+
+Two possible manager settings:
+
+Shared Pool — all HRs see the same pool; HR picks and then it's allocated to that HR (current_owner_id set when HR picks).
+
+Assigned Equally — system cycles through active HRs and assigns rows evenly (round-robin). (Default: Assigned Equally.)
+
+Create lead rows with source_manager_id = manager.id, current_owner_id set to HR or NULL (depending on strategy), status 'new'.
+
+HR workflow:
+
+HR sees only their assigned leads (or the shared pool if Manager selected shared pool).
+
+HR updates status. Important transitions:
+
+When HR sets status = scheduled, prompt to require: walkin_date, walkin_time, domain, session_days.
+
+When HR sets status = completed, system:
+
+Marks is_active = False for HR's queue (no longer visible in HR active view).
+
+Creates a new entry linking the lead to an Accounts owner (auto-assign to Accounts user via round-robin or allow manager-set default accounts user). Set status = pending for Accounts queue and set current_owner_id to Accounts user.
+
+reschedule => keep current_owner_id same HR; update lead_history and send notification (if present).
+
+not_interested, not_available, no_show remain with HR and appear in HR dashboard (counts).
+
+Every change writes a lead_history row (previous_status, new_status, changed_by, timestamp, any changed fields).
+
+Accounts workflow:
+
+Accounts sees leads forwarded by HR (with HR name).
+
+Accounts chooses status: pending, ready_for_class, pending_but_ready.
+
+If Accounts marks ready_for_class or pending_but_ready, the record is flagged for Admin review; Admin sees these flagged records in their dashboard.
+
+Accounts can reassign to other accounts users (history recorded).
+
+Admin workflow:
+
+Admin sees all records that are ready_for_class or pending_but_ready.
+
+Admin can export selected records (Excel) with all required fields and modification dates.
+
+Manager transparency / monitoring:
+
+Manager dashboard must show:
+
+Live counts: total leads uploaded, per-HR active count, per-Accounts count, statuses breakdown.
+
+For any lead: full travel log (lead_history) + timestamps + who modified it last.
+
+Visual flow: e.g., a timeline or table showing Manager -> HR -> Accounts -> Admin transitions per lead.
+
+Frontend pages & components (UX)
+
+Login page — role-aware redirect.
+
+Manager dashboard
+
+Create user modal (role select).
+
+Users table (search, edit, delete).
+
+Upload leads form (file input + allocation strategy select).
+
+Global monitoring panel: bar charts or counts (HR counts, Accounts counts, status distribution).
+
+Per-lead search & travel log modal.
+
+HR dashboard
+
+Queue table: columns name, phone, email, location, degree, status, actions (view, edit, change status).
+
+Edit lead modal: form to edit fields and change status. If status scheduled -> show required scheduling fields.
+
+Filters: status, date range, search by name/email.
+
+Accounts dashboard
+
+Table: lead list sent to accounts, with HR name column and status change buttons.
+
+Per-HR summary on right (counts of leads sent by each HR).
+
+Admin dashboard
+
+List of leads with statuses ready_for_class or pending_but_ready.
+
+Export button (filtered export).
+
+Shared UI details
+
+All status changes require confirmation modal and optional notes field (reason).
+
+Each page has an “Activity / Audit” button to pull lead_history.
+
+Excel upload format & validation
+
+Required columns (exact names): name, email, phone, location, degree
+
+Optional columns: domain, session_days, walkin_date, walkin_time.
+
+Server validates invalid rows, returns a detailed summary: processed_count, failed_count with row errors.
+
+Save original file in uploads/ and create an uploads DB record with status.
+
+Security & validation
+
+Password hashing + salted hashing (werkzeug).
+
+Role-based decorators (e.g., @role_required('manager')).
+
+Input validation on backend for all user-supplied values.
+
+File upload size limit and type check (only .xlsx, .xls, .csv).
+
+CSRF protection for forms (Flask-WTF or manual token).
+
+Rate-limit manager create/delete endpoints (simple throttle optional).
+
+Sanitise all queries to avoid SQL injection (SQLAlchemy ORM helps).
+
+Exports & reports
+
+Admin GET /admin/export?from=YYYY-MM-DD&to=YYYY-MM-DD&hr_id=&account_id=&status= returns a CSV/Excel file.
+
+Export columns: name,email,phone,location,degree,domain,walkin_date,walkin_time,session_days,hr_name,accounts_name,status,source_manager_name,backend_modified_at.
+
+Notifications (optional, minimal)
+
+On key events (lead assigned, status -> completed, reschedule), store an in-app notification in DB (table notifications) so Manager can see events. Email/SMS is out of scope unless requested.
+
+Acceptance criteria & test cases (must pass)
+
+Manager can create an HR user; HR can login with that user and sees only assigned leads.
+
+Manager uploads Excel with 10 rows -> leads are created and assigned following allocation strategy. Upload summary is returned.
+
+HR edits a lead, sets status to scheduled, supplies walkin date/time — fields are saved and visible in lead row; history shows change.
+
+HR sets status completed -> lead disappears from HR active queue and appears in Accounts queue, with source_hr visible.
+
+Accounts sets a lead to ready_for_class -> Admin dashboard shows it and export includes this record.
+
+Manager can view the full travel log for a lead and see timestamps and which user made each change.
+
+Export by Admin yields correct columns and includes backend modification date.
+
+Role restrictions: HR cannot create users; only Manager can create/delete users.
