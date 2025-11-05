@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: hrm-portal
+    runtime: node
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 5000
+      - key: MANAGER_EMAIL
+        sync: false
+      - key: MANAGER_PASSWORD
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: hrm-database
+          property: connectionString
+
+databases:
+  - name: hrm-database
+    databaseName: hrm_portal
+    user: hrm_user
